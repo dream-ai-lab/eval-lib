@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from typing import Callable, Sequence
 
 import mlflow
@@ -23,19 +24,32 @@ from .spec import load_spec, metric_names
 ModelFn = Callable[[Sequence[str]], Sequence[int]]
 
 
-def _git_commit() -> str:
-    # In a container the source is COPYied without .git; the build passes the
-    # commit through GIT_COMMIT so the golden record stays accurate.
-    env = os.environ.get("GIT_COMMIT")
-    if env:
-        return env
+def _git(args: list[str]) -> str:
     try:
-        out = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, stderr=subprocess.DEVNULL
-        )
+        out = subprocess.check_output(["git", *args], text=True, stderr=subprocess.DEVNULL)
         return out.strip()
     except Exception:
-        return "unknown"
+        return ""
+
+
+def _source_provenance() -> dict:
+    """Where the code came from — so a run traces back to the exact source.
+
+    commit hash alone is not enough: you also need the repo URL (which repo?)
+    and whether the tree was dirty (does the hash represent what ran?). Each
+    field accepts an env override (GIT_COMMIT / GIT_REMOTE / GIT_BRANCH /
+    GIT_DIRTY) for containers / CI where ``.git`` is absent.
+    """
+    in_repo = _git(["rev-parse", "--is-inside-work-tree"]) == "true"
+    dirty = os.environ.get("GIT_DIRTY")
+    if dirty is None:
+        dirty = ("true" if _git(["status", "--porcelain"]) else "false") if in_repo else "unknown"
+    return {
+        "git_commit": os.environ.get("GIT_COMMIT") or _git(["rev-parse", "--short", "HEAD"]) or "unknown",
+        "git_remote": os.environ.get("GIT_REMOTE") or _git(["config", "--get", "remote.origin.url"]) or "unknown",
+        "git_branch": os.environ.get("GIT_BRANCH") or _git(["rev-parse", "--abbrev-ref", "HEAD"]) or "unknown",
+        "git_dirty": dirty,
+    }
 
 
 def check_target(results: dict, target) -> bool:
@@ -99,7 +113,7 @@ def run_paper(
     # they show up both in run detail and in filterable search).
     golden = {
         "paper_id": spec.paper_id,
-        "git_commit": _git_commit(),
+        **_source_provenance(),
         "hf_dataset_id": f"{spec.dataset.hf_id}@{spec.dataset.version}",
         "eval_spec_hash": spec.hash,
         "metric_lib_version": version.__version__,
@@ -112,6 +126,14 @@ def run_paper(
         mlflow.log_params(_config_params(spec))
         # The exact spec file, attached so anyone can pull the full config.
         mlflow.log_artifact(spec_path, artifact_path="eval_spec")
+        # Snapshot the entry script too, so the run stays traceable even if the
+        # source repo is later moved, deleted, or force-pushed.
+        entry = sys.argv[0] if sys.argv else ""
+        if entry and os.path.isfile(entry):
+            try:
+                mlflow.log_artifact(entry, artifact_path="source")
+            except Exception:
+                pass
         mlflow.set_tags(
             {
                 **golden,
