@@ -2,7 +2,12 @@
 
 import pytest
 
-from eval_lib.spec import SpecError, canonical_hash, validate
+from eval_lib.spec import (
+    SpecError,
+    canonical_hash,
+    check_experimental_provided,
+    validate,
+)
 
 
 def _valid_raw():
@@ -45,6 +50,41 @@ def test_unknown_metric_rejected():
     raw["metrics"]["primary"] = "not_a_metric"
     with pytest.raises(SpecError):
         validate(raw)
+
+
+def test_experimental_metric_allowed():
+    raw = _valid_raw()
+    raw["metrics"] = {"primary": "mcc", "experimental": ["mcc"]}
+    raw["reproduce_target"] = {"mcc": {"min": 0.5, "max": 0.6}}
+    validate(raw)  # not in registry, but declared experimental -> ok
+
+
+def test_experimental_cannot_shadow_standard_metric():
+    raw = _valid_raw()
+    raw["metrics"]["experimental"] = ["accuracy"]  # accuracy is a registry metric
+    with pytest.raises(SpecError):
+        validate(raw)
+
+
+def test_unknown_metric_still_rejected_without_experimental():
+    raw = _valid_raw()
+    raw["metrics"]["secondary"] = ["mcc"]  # not registered, not experimental
+    with pytest.raises(SpecError):
+        validate(raw)
+
+
+def test_check_experimental_provided_missing():
+    with pytest.raises(SpecError):
+        check_experimental_provided(["mcc"], provided=[])
+
+
+def test_check_experimental_provided_stray():
+    with pytest.raises(SpecError):
+        check_experimental_provided([], provided=["mcc"])
+
+
+def test_check_experimental_provided_match():
+    check_experimental_provided(["mcc"], provided=["mcc"])  # no raise
 
 
 def test_canonical_hash_is_order_independent():

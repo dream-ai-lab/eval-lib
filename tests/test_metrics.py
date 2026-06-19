@@ -30,3 +30,25 @@ def test_evaluate_runs_all_named():
 def test_unknown_metric_rejected():
     with pytest.raises(KeyError):
         metrics.get("bleu_imaginary")
+
+
+def test_evaluate_with_extra_metric():
+    # An experimental metric not in the registry, supplied via `extra`.
+    def hits(preds, refs):
+        return float(sum(p == r for p, r in zip(preds, refs)))
+
+    out = metrics.evaluate([1, 0, 1], [1, 1, 1], ["accuracy", "hits"], extra={"hits": hits})
+    assert out["hits"] == 2.0
+    assert out["accuracy"] == pytest.approx(2 / 3)
+
+
+def test_fingerprint_deterministic_and_source_sensitive():
+    def mcc_a(preds, refs):
+        return 0.0
+
+    def mcc_b(preds, refs):
+        return 1.0  # different source
+
+    assert metrics.fingerprint({"mcc": mcc_a}) == metrics.fingerprint({"mcc": mcc_a})
+    assert metrics.fingerprint({"mcc": mcc_a}) != metrics.fingerprint({"mcc": mcc_b})
+    assert metrics.fingerprint({"mcc": mcc_a}).startswith("sha256:")

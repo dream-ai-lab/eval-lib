@@ -18,7 +18,12 @@ import mlflow
 
 from . import metrics, version
 from .data import load_eval_split
-from .spec import load_spec, metric_names
+from .spec import (
+    check_experimental_provided,
+    experimental_names,
+    load_spec,
+    metric_names,
+)
 
 # model_fn takes the list of input texts and returns predicted labels.
 ModelFn = Callable[[Sequence[str]], Sequence[int]]
@@ -93,20 +98,32 @@ def run_paper(
     role: str = "reproduce",
     parent_run_id: str | None = None,
     run_name: str | None = None,
+    extra_metrics: dict[str, Callable] | None = None,
 ) -> dict:
     """Validate spec → load data → run model → log golden record to MLflow.
+
+    ``extra_metrics`` supplies the callables for any metric declared under
+    ``metrics.experimental`` in the spec (``{name: fn}``). Such a run is tagged
+    ``eval_tier=experimental`` and is never a standard baseline.
 
     Returns ``{run_id, results, reproduce_passed}``.
     """
     spec = load_spec(spec_path)
     names = metric_names(spec)
 
+    # Experimental metrics live in the experiment, not the registry. Cross-check
+    # the declaration against what was actually passed before doing any work.
+    experimental = experimental_names(spec)
+    extra_metrics = extra_metrics or {}
+    check_experimental_provided(experimental, extra_metrics)
+    tier = "experimental" if experimental else "standard"
+
     texts, refs = load_eval_split(spec)
     preds = list(model_fn(texts))
     if len(preds) != len(refs):
         raise ValueError(f"model_fn returned {len(preds)} preds for {len(refs)} examples")
 
-    results = metrics.evaluate(preds, refs, names)
+    results = metrics.evaluate(preds, refs, names, extra=extra_metrics)
     passed = check_target(results, spec.reproduce_target)
 
     # The five required golden-record fields (logged as params AND tags so
@@ -134,13 +151,19 @@ def run_paper(
                 mlflow.log_artifact(entry, artifact_path="source")
             except Exception:
                 pass
-        mlflow.set_tags(
-            {
-                **golden,
-                "role": role,
-                "reproduce_passed": str(passed),
-            }
-        )
+        tags = {
+            **golden,
+            "role": role,
+            "reproduce_passed": str(passed),
+            "eval_tier": tier,
+        }
+        # An experimental run records WHICH metrics were experimental and a
+        # fingerprint of their implementations, so two such runs are only
+        # comparable when the metric code — not just the name — matches.
+        if experimental:
+            tags["experimental_metrics"] = ",".join(sorted(experimental))
+            tags["experimental_metrics_fingerprint"] = metrics.fingerprint(extra_metrics)
+        mlflow.set_tags(tags)
         if parent_run_id:
             mlflow.set_tag("parent_run_id", parent_run_id)
         mlflow.log_metrics(results)
