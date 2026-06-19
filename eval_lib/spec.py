@@ -73,14 +73,31 @@ def validate(raw: dict) -> None:
     primary = m.get("primary")
     _require(bool(primary), "metrics.primary is required")
     available = metrics.available()
+
+    # Experimental metrics are supplied at runtime (run_paper(extra_metrics=...))
+    # instead of living in the registry, so a new-paper metric never blocks a run
+    # on a PR here. They may not shadow a standard metric, and any run using one
+    # is tagged eval_tier=experimental.
+    experimental = m.get("experimental", []) or []
+    _require(isinstance(experimental, list), "metrics.experimental must be a list")
+    for name in experimental:
+        _require(
+            name not in available,
+            f"metrics.experimental '{name}' shadows a standard metric; "
+            "remove it from 'experimental' (use the registered one)",
+        )
+    allowed = set(available) | set(experimental)
+
     _require(
-        primary in available,
-        f"metrics.primary '{primary}' not in metric_lib {available}",
+        primary in allowed,
+        f"metrics.primary '{primary}' not in metric_lib {available} "
+        "nor declared in metrics.experimental",
     )
     for sec in m.get("secondary", []) or []:
         _require(
-            sec in available,
-            f"metrics.secondary '{sec}' not in metric_lib {available}",
+            sec in allowed,
+            f"metrics.secondary '{sec}' not in metric_lib {available} "
+            "nor declared in metrics.experimental",
         )
 
     _require("reproduce_target" in raw, "missing 'reproduce_target'")
@@ -116,3 +133,31 @@ def metric_names(spec) -> list[str]:
     names = [spec.metrics.primary]
     names += list(getattr(spec.metrics, "secondary", []) or [])
     return names
+
+
+def experimental_names(spec) -> list[str]:
+    """Metrics declared experimental in the spec (supplied at runtime)."""
+    return list(getattr(spec.metrics, "experimental", []) or [])
+
+
+def check_experimental_provided(experimental, provided) -> None:
+    """Cross-check declared experimental metrics against runtime callables.
+
+    Every name in ``metrics.experimental`` must have a callable passed to
+    ``run_paper(extra_metrics=...)``; a callable passed but not declared is an
+    error (a typo, or an attempt to override a standard metric). Raises
+    ``SpecError`` on the first mismatch.
+    """
+    experimental, provided = set(experimental or []), set(provided or [])
+    missing = experimental - provided
+    _require(
+        not missing,
+        f"metrics.experimental declares {sorted(missing)} but no callable was "
+        "passed to run_paper(extra_metrics=...)",
+    )
+    stray = provided - experimental
+    _require(
+        not stray,
+        f"extra_metrics passed {sorted(stray)} but they are not declared in "
+        "metrics.experimental (add them, or remove the override)",
+    )

@@ -18,12 +18,39 @@ run_paper("eval_spec.yaml", model_fn, role="reproduce")
 ```
 
 - `metrics` — the metric registry (`accuracy`, `f1`, `f1_macro`). Used by name
-  from `eval_spec.yaml`. Add a metric here (with a test) and bump the version —
-  never write a one-off eval function in an experiment repo.
+  from `eval_spec.yaml`. Add a *standard* metric here (with a test) and bump the
+  version.
 - `load_spec(path)` — load + validate an `eval_spec.yaml` (pinned dataset +
   model, known metrics, required fields).
-- `run_paper(spec, model_fn, role=...)` — load the pinned dataset, run the
-  model, log the golden record to MLflow, check the reproduce target.
+- `run_paper(spec, model_fn, role=..., extra_metrics=...)` — load the pinned
+  dataset, run the model, log the golden record to MLflow, check the reproduce
+  target.
+
+## Experimental metrics — run a new metric now, no PR required
+
+A paper may need a metric the registry doesn't ship yet. Instead of blocking the
+run on a PR + release here, declare it in the spec and pass the callable at
+runtime:
+
+```yaml
+# eval_spec.yaml
+metrics:
+  primary: "mcc"
+  experimental: ["mcc"]     # not in the registry; supplied at runtime
+```
+
+```python
+def mcc(preds, refs): ...   # your metric, (preds, refs) -> float
+
+run_paper("eval_spec.yaml", model_fn, extra_metrics={"mcc": mcc})
+```
+
+The run is tagged `eval_tier=experimental` and records which metrics were
+experimental plus a fingerprint of their implementation, so it is never mistaken
+for a standard baseline. An experimental metric may **not** reuse a standard
+metric's name. **Promote** it when it stabilises: add the function here, bump the
+version, and drop it from `metrics.experimental` — the run then logs
+`eval_tier=standard` automatically.
 
 ## Why this is a package, not a copy
 
