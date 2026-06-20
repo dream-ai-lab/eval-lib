@@ -14,6 +14,10 @@ version are not directly comparable.
         to MLflow regardless of how it was computed (run_paper now delegates to
         it). Comparability is logged via metric_lib_version OR code_fingerprint.
         Tag rename: experimental_metrics_fingerprint -> code_fingerprint.
+0.4.0 — tracking backend switched MLflow -> Weights & Biases. log_run/run_paper
+        now log the golden record to W&B (project=WANDB_PROJECT, grouped by
+        paper_id); golden-record CONTENT and comparability semantics unchanged.
+        New runs go to W&B; pre-0.4 history stays in MLflow (not migrated).
 """
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"

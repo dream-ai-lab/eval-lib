@@ -1,15 +1,20 @@
 """The eval runner + the system of record.
 
 ``log_run`` is the core: given a ``results`` dict you computed however you like,
-it records the standard golden record (provenance, pinned spec, tier) to MLflow.
-It does NOT compute anything — so any evaluation paradigm (classification,
-generative win-rate, an LLM judge) can use the same store.
+it records the standard golden record (provenance, pinned spec, tier) to Weights
+& Biases. It does NOT compute anything — so any evaluation paradigm
+(classification, generative win-rate, an LLM judge) can use the same store.
 
 ``run_paper`` is a convenience over ``log_run`` for the classification case: it
 loads the pinned dataset, runs the caller's ``model_fn``, computes metrics from
 the shared library, then delegates the logging to ``log_run``. Reproduce and
-proposal runs use the SAME path — the only difference is the ``role`` tag and an
-optional parent run id — which is what makes deltas comparable.
+proposal runs use the SAME path — the only difference is the ``role`` job type
+and an optional parent run id — which is what makes deltas comparable.
+
+W&B target is taken from the environment: ``WANDB_ENTITY`` (team) and
+``WANDB_PROJECT`` (defaults to ``eval-lib``); every run is grouped by
+``paper_id`` so a paper's runs sit together. ``wandb login`` / ``WANDB_API_KEY``
+controls auth; ``WANDB_MODE=offline`` runs without a network.
 """
 
 from __future__ import annotations
@@ -19,7 +24,7 @@ import subprocess
 import sys
 from typing import Callable, Sequence
 
-import mlflow
+import wandb
 
 from . import metrics, version
 from .data import load_eval_split
@@ -32,6 +37,8 @@ from .spec import (
 
 # model_fn takes the list of input texts and returns predicted labels.
 ModelFn = Callable[[Sequence[str]], Sequence[int]]
+
+WANDB_PROJECT = os.environ.get("WANDB_PROJECT", "eval-lib")
 
 
 def _git(args: list[str]) -> str:
@@ -75,7 +82,7 @@ def check_target(results: dict, target) -> bool:
 
 def _config_params(spec) -> dict:
     """Every config scalar, flattened, so each is individually searchable in
-    MLflow (a teammate can filter on dataset.revision, inference.seed, etc.)."""
+    W&B (a teammate can filter on dataset.revision, inference.seed, etc.)."""
     ds, m, inf = spec.dataset, spec.model, spec.inference
     return {
         "spec_version": getattr(spec, "spec_version", "unknown"),
@@ -97,23 +104,29 @@ def _config_params(spec) -> dict:
     }
 
 
-def _snapshot_entry_script() -> None:
-    """Attach the entry script (``sys.argv[0]``) as an artifact, so the run stays
+def _attach_files(run, paths) -> None:
+    """Attach files (spec, entry script, extras) to the run, so it stays
     traceable even if its source repo is later moved, deleted, or force-pushed."""
-    entry = sys.argv[0] if sys.argv else ""
-    if entry and os.path.isfile(entry):
-        try:
-            mlflow.log_artifact(entry, artifact_path="source")
-        except Exception:
-            pass
+    for path in paths:
+        if path and os.path.isfile(path):
+            try:
+                run.save(path, base_path=os.path.dirname(os.path.abspath(path)), policy="now")
+            except Exception:
+                pass
 
 
-def _log_deltas(results: dict, parent_run_id: str) -> None:
-    """Log ``delta_<metric>`` against the baseline (parent) run, for proposals."""
-    base = mlflow.get_run(parent_run_id).data.metrics
-    for k, v in results.items():
-        if k in base:
-            mlflow.log_metric(f"delta_{k}", v - base[k])
+def _log_deltas(run, results: dict, parent_run_id: str) -> None:
+    """Best-effort ``delta_<metric>`` vs the baseline (parent) run.
+
+    Needs the W&B API (online); silently skipped offline or without access."""
+    try:
+        parent = wandb.Api().run(f"{run.entity}/{run.project}/{parent_run_id}")
+        base = dict(parent.summary)
+        for k, v in results.items():
+            if k in base:
+                run.summary[f"delta_{k}"] = v - base[k]
+    except Exception:
+        pass
 
 
 def log_run(
@@ -129,7 +142,7 @@ def log_run(
     artifacts: list[str] | None = None,
     extra_tags: dict | None = None,
 ) -> dict:
-    """Record a result + provenance to MLflow — the system of record.
+    """Record a result + provenance to W&B — the system of record.
 
     eval-lib does NOT compute ``results`` here: you produce them however you like
     (classification via ``run_paper``, generative win-rate, an LLM judge, …) and
@@ -155,46 +168,44 @@ def log_run(
     passed = check_target(results, spec.reproduce_target)
     tier = "experimental" if code_fingerprint else "standard"
 
-    golden = {
+    # The golden record — provenance + pinned identity — lives in W&B config so
+    # every field is individually filterable.
+    config = {
         "paper_id": spec.paper_id,
         **_source_provenance(),
         "hf_dataset_id": f"{spec.dataset.hf_id}@{spec.dataset.version}",
+        "hf_model_id": f"{spec.model.hf_id}@{spec.model.revision}",
         "eval_spec_hash": spec.hash,
         "metric_lib_version": metric_lib_version or "byo",
+        "role": role,
+        "eval_tier": tier,
+        "reproduce_passed": passed,
+        **(params or {}),
+        **(extra_tags or {}),
     }
+    if code_fingerprint:
+        config["code_fingerprint"] = code_fingerprint
+    if parent_run_id:
+        config["parent_run_id"] = parent_run_id
 
-    mlflow.set_experiment(spec.paper_id)
-    with mlflow.start_run(run_name=run_name or f"{role}-{spec.paper_id}") as active:
-        mlflow.log_params(golden)
-        mlflow.log_param("hf_model_id", f"{spec.model.hf_id}@{spec.model.revision}")
-        mlflow.log_params(params or {})
-        # The exact spec file, attached so anyone can pull the full config.
-        mlflow.log_artifact(spec_path, artifact_path="eval_spec")
-        _snapshot_entry_script()
-        for path in artifacts or []:
-            if os.path.isfile(path):
-                mlflow.log_artifact(path, artifact_path="extra")
-        tags = {
-            **golden,
-            "role": role,
-            "reproduce_passed": str(passed),
-            "eval_tier": tier,
-        }
-        # The fingerprint pins the code that produced the numbers, so two
-        # experimental runs are comparable only when the code — not just the
-        # metric name — matches.
-        if code_fingerprint:
-            tags["code_fingerprint"] = code_fingerprint
-        tags.update(extra_tags or {})
-        mlflow.set_tags(tags)
-        if parent_run_id:
-            mlflow.set_tag("parent_run_id", parent_run_id)
-        mlflow.log_metrics(results)
-
+    run = wandb.init(
+        entity=os.environ.get("WANDB_ENTITY"),
+        project=WANDB_PROJECT,
+        group=spec.paper_id,          # a paper's runs sit together (≈ an experiment)
+        job_type=role,
+        name=run_name or f"{role}-{spec.paper_id}",
+        config=config,
+        tags=[f"role:{role}", f"tier:{tier}", spec.paper_id],
+        reinit=True,
+    )
+    try:
+        run.log(results)              # final metrics → run summary + history point
+        _attach_files(run, [spec_path, sys.argv[0] if sys.argv else "", *(artifacts or [])])
         if role == "proposal" and parent_run_id:
-            _log_deltas(results, parent_run_id)
-
-        run_id = active.info.run_id
+            _log_deltas(run, results, parent_run_id)
+        run_id = run.id
+    finally:
+        run.finish()
 
     return {"run_id": run_id, "results": results, "reproduce_passed": passed}
 

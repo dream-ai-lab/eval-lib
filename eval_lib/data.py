@@ -1,6 +1,6 @@
 """Load an evaluation dataset exactly as pinned in the spec.
 
-Kept separate from the runner so the contract layer (metrics, mlflow
+Kept separate from the runner so the contract layer (metrics, wandb
 logging) does not depend on heavy ML libraries being importable.
 """
 

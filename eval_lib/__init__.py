@@ -2,7 +2,7 @@
 
 Public API:
     load_spec(path)              load + validate an eval_spec.yaml
-    log_run(spec, results)       record a result + provenance to MLflow
+    log_run(spec, results)       record a result + provenance to W&B
     run_paper(spec, model_fn)    classification convenience over log_run
     metrics.evaluate(...)        compute metrics by name
 """
