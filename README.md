@@ -5,8 +5,19 @@ installable library. Experiment repos depend on a **pinned version** of this
 package — they never fork or copy it.
 
 ```bash
-pip install "git+https://github.com/dream-ai-lab/eval-lib@v0.1.0"
+pip install "git+https://github.com/dream-ai-lab/eval-lib@v0.4.0"
 ```
+
+Runs are logged to **Weights & Biases**. Point it at your team once:
+
+```bash
+wandb login                          # or set WANDB_API_KEY
+export WANDB_ENTITY=dream-ai-lab     # your W&B team
+export WANDB_PROJECT=eval-lib        # optional; defaults to "eval-lib"
+# export WANDB_MODE=offline          # run without a network; sync later
+```
+
+Every run is grouped by `paper_id`, so a paper's runs sit together.
 
 ## API
 
@@ -23,7 +34,7 @@ run_paper("eval_spec.yaml", model_fn, role="reproduce")
 - `load_spec(path)` — load + validate an `eval_spec.yaml` (pinned dataset +
   model, known metrics, required fields).
 - `log_run(spec, results, ...)` — the system of record: record a `results` dict
-  (computed however you like) + provenance to MLflow. See below.
+  (computed however you like) + provenance to W&B. See below.
 - `run_paper(spec, model_fn, role=..., extra_metrics=...)` — classification
   convenience over `log_run`: load the pinned dataset, run the model, compute
   metrics, then log.
